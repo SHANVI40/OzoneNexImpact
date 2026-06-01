@@ -1,0 +1,143 @@
+/*************************************************************
+ * OZONE NEXIMPACT — Apps Script backend (Code.gs)
+ *
+ * This turns a Google Sheet into the API for your dashboard.
+ * One sheet (tab) per category. The header row = field names
+ * (must match the SCHEMA in index.html).
+ *
+ * Required tabs (create these tabs in your Spreadsheet):
+ *   outer, lining, inventory, color, zippers, threads
+ *   Users     -> columns: Username | Password | Role | Views
+ *   Activity  -> columns: When | User | Action | Category | Detail
+ *
+ * After pasting this: Deploy ▸ New deployment ▸ Web app
+ *   Execute as: Me      Who has access: Anyone
+ * Copy the /exec URL into CONFIG.API_URL in index.html.
+ *************************************************************/
+
+// Tabs that hold catalogue data (must match SCHEMA keys in the frontend)
+var CATEGORIES = ['outer','lining','inventory','color','zippers','threads'];
+
+function doPost(e) {
+  var out = { ok: false };
+  try {
+    var req = JSON.parse(e.postData.contents);
+    var action = req.action;
+
+    if (action === 'login')      out = login(req.username, req.password);
+    else if (action === 'getAll') out = getAll();
+    else if (action === 'add')    out = addRow(req.category, req.row, req._user);
+    else if (action === 'update') out = updateRow(req.category, req.index, req.row, req._user);
+    else if (action === 'delete') out = deleteRow(req.category, req.index, req._user);
+    else if (action === 'addUser')out = addUser(req.user);
+    else out = { ok:false, error:'unknown action: ' + action };
+  } catch (err) {
+    out = { ok:false, error: String(err) };
+  }
+  return json(out);
+}
+
+// Allows a quick browser check that the deployment works
+function doGet() {
+  return json({ ok:true, msg:'Ozone NexImpact API is live' });
+}
+
+function json(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function ss(){ return SpreadsheetApp.getActiveSpreadsheet(); }
+
+/* Read a tab into an array of objects keyed by the header row */
+function readTab(name) {
+  var sh = ss().getSheetByName(name);
+  if (!sh) return [];
+  var values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  var headers = values[0];
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    var obj = {};
+    for (var c = 0; c < headers.length; c++) obj[headers[c]] = values[i][c];
+    rows.push(obj);
+  }
+  return rows;
+}
+
+function login(username, password) {
+  var users = readTab('Users');
+  var u = users.filter(function(x){ return String(x.Username) === String(username) && String(x.Password) === String(password); })[0];
+  if (!u) return { ok:false, error:'Invalid credentials' };
+  return { ok:true, user:{ name:u.Username, role:u.Role, views:u.Views } };
+}
+
+function getAll() {
+  var data = {};
+  CATEGORIES.forEach(function(c){ data[c] = readTab(c); });
+  return { ok:true, data:data, users:readTab('Users'), activity:readTab('Activity') };
+}
+
+function addRow(category, row, user) {
+  var sh = ss().getSheetByName(category);
+  if (!sh) return { ok:false, error:'No tab named ' + category };
+  var headers = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
+  var line = headers.map(function(h){ return row[h] !== undefined ? row[h] : ''; });
+  sh.appendRow(line);
+  logActivity(user, 'ADD', category, line[0]);
+  return { ok:true };
+}
+
+function updateRow(category, index, row, user) {
+  var sh = ss().getSheetByName(category);
+  var headers = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
+  var line = headers.map(function(h){ return row[h] !== undefined ? row[h] : ''; });
+  sh.getRange(index + 2, 1, 1, line.length).setValues([line]); // +2: header + 0-index
+  logActivity(user, 'EDIT', category, line[0]);
+  return { ok:true };
+}
+
+function deleteRow(category, index, user) {
+  var sh = ss().getSheetByName(category);
+  var first = sh.getRange(index + 2, 1).getValue();
+  sh.deleteRow(index + 2);
+  logActivity(user, 'DELETE', category, first);
+  return { ok:true };
+}
+
+function addUser(user) {
+  var sh = ss().getSheetByName('Users');
+  sh.appendRow([user.Username, user.Password, user.Role, user.Views]);
+  return { ok:true };
+}
+
+function logActivity(user, action, category, detail) {
+  var sh = ss().getSheetByName('Activity');
+  if (!sh) return;
+  var when = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  sh.insertRowBefore(2);
+  sh.getRange(2,1,1,5).setValues([[when, (user||'system'), action, category, detail]]);
+}
+
+/* Run ONCE from the editor to auto-create all tabs with headers + a sample user */
+function setupSheets() {
+  var book = ss();
+  var schema = {
+    outer:     ['Code','Name','Composition','GSM','Color','Vendor','Balance','Unit'],
+    lining:    ['Code','Name','Composition','GSM','Color','Vendor','Balance','Unit'],
+    inventory: ['Code','Item','Category','Location','Vendor','Balance','Unit','Status'],
+    color:     ['RefNo','ColorName','Pantone','Vendor','Stage','Status','RequestedBy'],
+    zippers:   ['Code','Type','Size','Finish','Color','Vendor','Balance','Unit'],
+    threads:   ['Code','Brand','Tex','ColorName','Vendor','SizesAvailable','Balance','Status'],
+    Users:     ['Username','Password','Role','Views'],
+    Activity:  ['When','User','Action','Category','Detail']
+  };
+  Object.keys(schema).forEach(function(name){
+    var sh = book.getSheetByName(name) || book.insertSheet(name);
+    sh.clear();
+    sh.getRange(1,1,1,schema[name].length).setValues([schema[name]]);
+    sh.setFrozenRows(1);
+  });
+  book.getSheetByName('Users').appendRow(['admin','admin','Super Admin','ALL']);
+}
